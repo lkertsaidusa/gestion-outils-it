@@ -1,0 +1,462 @@
+import os
+import logging
+import customtkinter as ctk
+from PIL import Image, ImageTk
+
+logger = logging.getLogger(__name__)
+
+
+def hex_to_rgb(hex_color: str):
+    """Convertit une couleur hex en RGB tuple"""
+    hex_color = hex_color.lstrip("#")
+    return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+
+
+def rgb_to_hex(rgb):
+    """Convertit un tuple RGB en couleur hex"""
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def lerp_color(a_hex, b_hex, t: float):
+    """Interpolation linéaire entre deux couleurs hex (t entre 0 et 1)"""
+    a = hex_to_rgb(a_hex)
+    b = hex_to_rgb(b_hex)
+    return rgb_to_hex(tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3)))
+
+
+class AnimatedSearchBar(ctk.CTkFrame):
+    """Barre de recherche avec animations de bordure et placeholder"""
+    
+    # Configuration visuelle
+    SEARCH_WIDTH = 560
+    SEARCH_HEIGHT = 60
+    SEARCH_CORNER = 16
+    
+    # Bordure animée quand focus
+    PILL_BORDER_COLOR = "#166FFF"  # bleu
+    PILL_BORDER_WIDTH_FOCUS = 3
+    PILL_BORDER_WIDTH_NORMAL = 0
+    PILL_BG = "#FFFFFF"  # fond blanc de la search pill
+    
+    # Paramètres d'animation
+    _ANIM_STEPS = 4
+    _ANIM_INTERVAL_MS = 12  # animation totale ~120ms
+    
+    def __init__(self, parent, on_search=None, icons_dir=None, **kwargs):
+        """
+        parent: widget parent
+        on_search: callback(query: str) appelé lors de la recherche
+        icons_dir: chemin vers le dossier des icônes
+        """
+        super().__init__(parent, **kwargs)
+        
+        self.configure(fg_color="transparent")
+        self.on_search = on_search
+        self._images = {}
+        
+        # Répertoire des icônes
+        if icons_dir:
+            self.ICONS_DIR = icons_dir
+        else:
+            self.ICONS_DIR = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "assets", "icons")
+            )
+        
+        # État des animations
+        self._border_anim_job = None
+        self._placeholder_anim_job = None
+        self._border_progress = 0.0  # 0: normal, 1: focused
+        self._placeholder_progress = 1.0  # 1: visible, 0: hidden
+        
+        self._create_search_bar()
+        
+        # Bind global pour défocus quand on clique ailleurs
+        try:
+            parent.bind("<Button-1>", self._on_global_click, add="+")
+        except Exception:
+            logger.exception("Could not bind global click")
+    
+    def _load_icon(self, candidates, size=(36, 36)):
+        """Charge une icône depuis une liste de noms candidats"""
+        for name in candidates:
+            path = os.path.join(self.ICONS_DIR, name)
+            if os.path.exists(path):
+                try:
+                    img = Image.open(path).convert("RGBA")
+                    resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+                    img = img.resize(size, resample)
+                    photo = ImageTk.PhotoImage(img)
+                    self._images[path] = photo
+                    return photo
+                except Exception:
+                    logger.exception("Error loading icon %s", path)
+        return None
+    
+    def _create_search_bar(self):
+        """Créer la barre de recherche avec icône statique et placeholder/bordure animés"""
+        
+        # Container principal de la search pill
+        self.search_frame = ctk.CTkFrame(
+            self,
+            fg_color=self.PILL_BG,
+            corner_radius=self.SEARCH_CORNER,
+            height=self.SEARCH_HEIGHT,
+            border_width=self.PILL_BORDER_WIDTH_NORMAL,
+            border_color=self.PILL_BORDER_COLOR
+        )
+        self.search_frame.pack(fill="x", expand=True)
+        self.search_frame.configure(width=self.SEARCH_WIDTH)
+        self.search_frame.pack_propagate(False)
+        self.search_frame.grid_columnconfigure(1, weight=1)
+        
+        # Icône de recherche (statique)
+        search_icon = self._load_icon(
+            ["search.png", "icon-search.png", "search_icon.png"],
+            size=(36, 36)
+        )
+        if search_icon:
+            icon_label = ctk.CTkLabel(
+                self.search_frame,
+                image=search_icon,
+                text="",
+                fg_color=self.PILL_BG
+            )
+            icon_label.grid(row=0, column=0, padx=(25, 8), pady=(17, 17))
+        else:
+            # Fallback emoji si pas d'icône trouvée
+            icon_label = ctk.CTkLabel(
+                self.search_frame,
+                text="🔍",
+                fg_color=self.PILL_BG,
+                font=ctk.CTkFont(size=18)
+            )
+            icon_label.grid(row=0, column=0, padx=(25, 8), pady=(17, 17))
+        
+        # Entry (sans placeholder_text car on gère le nôtre)
+        inter_font = ctk.CTkFont(family="Inter", size=18, weight="bold")
+        self.search_entry = ctk.CTkEntry(
+            master=self.search_frame,
+            placeholder_text="",  # géré manuellement
+            fg_color=self.PILL_BG,
+            border_width=0,
+            font=inter_font,
+            text_color="#111827",
+            width=self.SEARCH_WIDTH - 120
+        )
+        self.search_entry.grid(row=0, column=1, padx=(0, 20), pady=(10, 10), sticky="ew")
+        
+        # Label placeholder superposé (animé)
+        placeholder_color = "#6B7280"  # gris
+        self.placeholder_label = ctk.CTkLabel(
+            self.search_frame,
+            text="Search",
+            font=inter_font,
+            text_color=placeholder_color,
+            fg_color=self.PILL_BG
+        )
+        self.placeholder_label.grid(row=0, column=1, padx=(4, 20), pady=(10, 10), sticky="w")
+        self.placeholder_label.lift(self.search_entry)
+        
+        # Bindings pour les événements
+        self.search_entry.bind("<FocusIn>", self._on_search_focus_in)
+        self.search_entry.bind("<FocusOut>", self._on_search_focus_out)
+        self.search_entry.bind("<KeyRelease>", self._on_search_key)
+        self.search_entry.bind("<Return>", lambda e: self._perform_search())
+        
+        # Clic sur le frame/icône/placeholder -> focus l'entry
+        def focus_entry(event):
+            try:
+                self.search_entry.focus_set()
+            except Exception:
+                pass
+        
+        self.search_frame.bind("<Button-1>", focus_entry)
+        icon_label.bind("<Button-1>", focus_entry)
+        self.placeholder_label.bind("<Button-1>", focus_entry)
+        
+        # État initial
+        self._set_placeholder_progress(1.0, instant=True)
+        self._set_border_progress(0.0, instant=True)
+    
+    # =====================================================================
+    # ANIMATION DE LA BORDURE
+    # =====================================================================
+    
+    def _set_border_progress(self, target, instant=False):
+        """Anime la progression de la bordure entre 0 et 1"""
+        if self._border_anim_job is not None:
+            try:
+                self.after_cancel(self._border_anim_job)
+            except Exception:
+                pass
+            self._border_anim_job = None
+        
+        if instant:
+            self._border_progress = float(target)
+            self._apply_border_state()
+            return
+        
+        # Animation par étapes
+        start = self._border_progress
+        steps = self._ANIM_STEPS
+        
+        def step(i):
+            t = i / float(steps)
+            prog = start + (target - start) * t
+            self._border_progress = prog
+            self._apply_border_state()
+            
+            if i < steps:
+                self._border_anim_job = self.after(
+                    self._ANIM_INTERVAL_MS,
+                    lambda: step(i + 1)
+                )
+            else:
+                self._border_anim_job = None
+        
+        step(0)
+    
+    def _apply_border_state(self):
+        """Applique l'état de la bordure selon self._border_progress"""
+        p = max(0.0, min(1.0, float(self._border_progress)))
+        
+        # Largeur de bordure interpolée
+        bw = int(round(self.PILL_BORDER_WIDTH_FOCUS * p))
+        
+        # Couleur de bordure interpolée (de invisible à bleu)
+        color = lerp_color(self.PILL_BG, self.PILL_BORDER_COLOR, p)
+        
+        try:
+            self.search_frame.configure(border_width=bw, border_color=color)
+        except Exception:
+            # Certaines versions de CTk ne supportent pas border_color dynamique
+            try:
+                self.search_frame.configure(border_width=bw)
+            except Exception:
+                pass
+    
+    # =====================================================================
+    # ANIMATION DU PLACEHOLDER
+    # =====================================================================
+    
+    def _set_placeholder_progress(self, target, instant=False):
+        """Anime la visibilité du placeholder entre 0 et 1 (1=visible)"""
+        if self._placeholder_anim_job is not None:
+            try:
+                self.after_cancel(self._placeholder_anim_job)
+            except Exception:
+                pass
+            self._placeholder_anim_job = None
+        
+        if instant:
+            self._placeholder_progress = float(target)
+            self._apply_placeholder_state()
+            return
+        
+        start = self._placeholder_progress
+        steps = self._ANIM_STEPS
+        
+        def step(i):
+            t = i / float(steps)
+            prog = start + (target - start) * t
+            self._placeholder_progress = prog
+            self._apply_placeholder_state()
+            
+            if i < steps:
+                self._placeholder_anim_job = self.after(
+                    self._ANIM_INTERVAL_MS,
+                    lambda: step(i + 1)
+                )
+            else:
+                self._placeholder_anim_job = None
+        
+        step(0)
+    
+    def _apply_placeholder_state(self):
+        """Applique la couleur du placeholder selon self._placeholder_progress"""
+        p = max(0.0, min(1.0, float(self._placeholder_progress)))
+        
+        # Interpolation de couleur (de invisible à gris)
+        invisible = self.PILL_BG
+        visible_color = "#6B7280"
+        color = lerp_color(invisible, visible_color, p)
+        
+        try:
+            self.placeholder_label.configure(text_color=color)
+            
+            # Si complètement caché, lower pour ne pas intercepter les clics
+            if p <= 0.01:
+                try:
+                    self.placeholder_label.lower(self.search_entry)
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.placeholder_label.lift(self.search_entry)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    # =====================================================================
+    # GESTION DES ÉVÉNEMENTS
+    # =====================================================================
+    
+    def _on_search_key(self, event=None):
+        """Cache le placeholder quand du contenu est présent"""
+        try:
+            content = self.search_entry.get()
+            if content.strip() != "":
+                self._set_placeholder_progress(0.0)
+            else:
+                self._set_placeholder_progress(1.0)
+        except Exception:
+            pass
+    
+    def _on_search_focus_in(self, event=None):
+        """Anime la bordure et cache le placeholder au focus"""
+        self._set_border_progress(1.0)
+        self._set_placeholder_progress(0.0)
+    
+    def _on_search_focus_out(self, event=None):
+        """Anime la bordure et restaure le placeholder si vide"""
+        self._set_border_progress(0.0)
+        
+        try:
+            content = self.search_entry.get().strip()
+        except Exception:
+            content = ""
+        
+        if content == "":
+            self._set_placeholder_progress(1.0)
+    
+    def _on_global_click(self, event):
+        """Retire le focus si on clique en dehors de la search bar"""
+        try:
+            x_root = event.x_root
+            y_root = event.y_root
+            
+            sx = self.search_frame.winfo_rootx()
+            sy = self.search_frame.winfo_rooty()
+            sw = self.search_frame.winfo_width()
+            sh = self.search_frame.winfo_height()
+            
+            inside = (sx <= x_root <= sx + sw) and (sy <= y_root <= sy + sh)
+            
+            if not inside:
+                try:
+                    self.focus_set()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    def _perform_search(self):
+        """Exécute la recherche et appelle le callback"""
+        query = ""
+        try:
+            query = self.search_entry.get().strip()
+        except Exception:
+            query = ""
+        
+        if callable(self.on_search):
+            try:
+                self.on_search(query)
+            except Exception:
+                logger.exception("Error in on_search callback")
+        else:
+            logger.info("Search triggered: %s", query)
+    
+    def get_value(self):
+        """Retourne la valeur actuelle de la search bar"""
+        try:
+            return self.search_entry.get()
+        except Exception:
+            return ""
+    
+    def set_value(self, text):
+        """Définit la valeur de la search bar"""
+        try:
+            self.search_entry.delete(0, "end")
+            self.search_entry.insert(0, text)
+            self._on_search_key()  # Mettre à jour le placeholder
+        except Exception:
+            pass
+    
+    def clear(self):
+        """Vide la search bar"""
+        self.set_value("")
+
+
+# =====================================================================
+# EXEMPLE D'UTILISATION
+# =====================================================================
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    
+    ctk.set_appearance_mode("light")
+    ctk.set_default_color_theme("blue")
+    
+    root = ctk.CTk()
+    root.title("Animated Search Bar Demo")
+    root.geometry("800x600")
+    root.configure(fg_color="#F0F4F9")
+    
+    # Frame container
+    container = ctk.CTkFrame(root, fg_color="transparent")
+    container.pack(fill="both", expand=True, padx=40, pady=40)
+    
+    # Titre
+    title = ctk.CTkLabel(
+        container,
+        text="Animated Search Bar",
+        font=ctk.CTkFont(family="Segoe UI", size=24, weight="bold")
+    )
+    title.pack(pady=(0, 30))
+    
+    # Callback de recherche
+    def on_search(query):
+        print(f"Recherche: '{query}'")
+        result_label.configure(text=f"Recherche effectuée: '{query}'")
+    
+    # Search bar
+    search_bar = AnimatedSearchBar(
+        container,
+        on_search=on_search,
+        icons_dir=None  # Utilisera le chemin par défaut
+    )
+    search_bar.pack(pady=20)
+    
+    # Label de résultat
+    result_label = ctk.CTkLabel(
+        container,
+        text="Tapez quelque chose et appuyez sur Entrée",
+        font=ctk.CTkFont(family="Segoe UI", size=14),
+        text_color="#6B7280"
+    )
+    result_label.pack(pady=20)
+    
+    # Boutons de test
+    buttons_frame = ctk.CTkFrame(container, fg_color="transparent")
+    buttons_frame.pack(pady=20)
+    
+    ctk.CTkButton(
+        buttons_frame,
+        text="Définir 'Test'",
+        command=lambda: search_bar.set_value("Test")
+    ).pack(side="left", padx=5)
+    
+    ctk.CTkButton(
+        buttons_frame,
+        text="Vider",
+        command=lambda: search_bar.clear()
+    ).pack(side="left", padx=5)
+    
+    ctk.CTkButton(
+        buttons_frame,
+        text="Obtenir valeur",
+        command=lambda: print(f"Valeur actuelle: '{search_bar.get_value()}'")
+    ).pack(side="left", padx=5)
+    
+    root.mainloop()
